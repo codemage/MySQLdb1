@@ -124,37 +124,63 @@ static int _mysql_server_init_done = 0;
 #define HAVE_MYSQL_OPT_TIMEOUTS 1
 #endif
 
+static void
+_mysql_SetError(PyObject *type, long code, PyObject *message_obj)
+{
+	PyObject *args;
+	if (!message_obj) return; // error raised by PyString_* method in caller
+
+	if (!(args = PyTuple_New(2))) return; // OOM raised by PyTuple_New
+
+	PyTuple_SET_ITEM(args, 0, PyInt_FromLong(code));
+	PyTuple_SET_ITEM(args, 1, message_obj);
+	if (PyTuple_GET_ITEM(args, 0) && PyTuple_GET_ITEM(args, 1)) {
+		PyErr_SetObject(type, args);
+	} // else arg tuple failed to be filled, and the cause is
+	  // already raised by one of the Py*_From* calls.
+
+	// either way, if we allocated a tuple we need to release our ref:
+	Py_DECREF(args);
+}
+
+static void
+_mysql_SetErrorString(PyObject *type, long code, const char *message)
+{
+#ifdef IS_PY3K
+	PyObject *message_obj = PyUnicode_FromString(message);
+#else
+	PyObject *message_obj = PyString_FromString(message);
+#endif
+	_mysql_SetError(type, code, message_obj);
+}
+
 PyObject *
 _mysql_Exception(_mysql_ConnectionObject *c)
 {
 	PyObject *t, *e;
 	int merr;
+	const char *message;
 
 	if (!(t = PyTuple_New(2))) return NULL;
 	if (!_mysql_server_init_done) {
-		e = _mysql_InternalError;
-		PyTuple_SET_ITEM(t, 0, PyInt_FromLong(-1L));
-#ifdef IS_PY3K
-		PyTuple_SET_ITEM(t, 1, PyUnicode_FromString("server not initialized"));
-#else
-		PyTuple_SET_ITEM(t, 1, PyString_FromString("server not initialized"));
-#endif
-		PyErr_SetObject(e, t);
-		Py_DECREF(t);
+		_mysql_SetErrorString(_mysql_InternalError, -1L,
+				      "server/library not initialized");
 		return NULL;
 	}
 	merr = mysql_errno(&(c->connection));
-	if (!merr)
+	message = mysql_error(&(c->connection));
+	if (!merr) {
 		e = _mysql_InterfaceError;
-	else if (merr > CR_MAX_ERROR) {
-		PyTuple_SET_ITEM(t, 0, PyInt_FromLong(-1L));
+	} else if (merr > CR_MAX_ERROR) {
+		// the C library gave us an error type we don't understand
 #ifdef IS_PY3K
-		PyTuple_SET_ITEM(t, 1, PyUnicode_FromString("error totally whack"));
+		PyObject *message_obj =
+			PyUnicode_FromFormat("error totally whack: %s", message);
 #else
-		PyTuple_SET_ITEM(t, 1, PyString_FromString("error totally whack"));
+		PyObject *message_obj =
+			PyString_FromFormat("error totally whack: %s", message);
 #endif
-		PyErr_SetObject(_mysql_InterfaceError, t);
-		Py_DECREF(t);
+		_mysql_SetError(_mysql_InternalError, -1L, message_obj);
 		return NULL;
 	}
 	else switch (merr) {
@@ -239,13 +265,7 @@ _mysql_Exception(_mysql_ConnectionObject *c)
 			e = _mysql_OperationalError;
 		break;
 	}
-	PyTuple_SET_ITEM(t, 0, PyInt_FromLong((long)merr));
-#ifdef IS_PY3K
-	PyTuple_SET_ITEM(t, 1, PyUnicode_FromString(mysql_error(&(c->connection))));
-#else
-	PyTuple_SET_ITEM(t, 1, PyString_FromString(mysql_error(&(c->connection))));
-#endif
-	PyErr_SetObject(e, t);
+	_mysql_SetErrorString(e, (long)merr, message);
 	Py_DECREF(t);
 	return NULL;
 }
